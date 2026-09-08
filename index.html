@@ -158,6 +158,7 @@
     <input class="input" id="authPassword" type="password" placeholder="Password" autocomplete="current-password" />
     <button class="btn" id="authSubmit">Log in</button>
     <button class="btn-ghost" id="authToggle">Don't have an account? Sign up</button>
+    <button class="btn-ghost" id="forgotBtn">Forgot password?</button>
     <div class="auth-error" id="authError"></div>
   </div>
 
@@ -214,6 +215,8 @@
   let currentUser = null;
   let books = [];
   let unsub = null;
+  let unsubUser = null;
+  let userGoals = {};
   let tab = "library";
   let statusFilter = "all";
   let searchQuery = "";
@@ -226,6 +229,10 @@
   const STATUS_LABELS = { "to-read": "To Read", "reading": "Reading", "read": "Read" };
 
   function $(id) { return document.getElementById(id); }
+  function todayStr() {
+    var d = new Date();
+    return d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0") + "-" + String(d.getDate()).padStart(2,"0");
+  }
   function escapeHtml(s) {
     var div = document.createElement("div");
     div.textContent = s || "";
@@ -252,6 +259,7 @@
       ? auth.createUserWithEmailAndPassword(email, pass)
       : auth.signInWithEmailAndPassword(email, pass);
     action.catch(function (err) {
+      $("authError").style.color = "var(--warn)";
       $("authError").textContent = friendlyAuthError(err);
     });
   });
@@ -266,6 +274,22 @@
     return err && err.message ? err.message : "Something went wrong.";
   }
 
+  $("forgotBtn").addEventListener("click", function () {
+    var email = $("authEmail").value.trim();
+    if (!email) {
+      $("authError").style.color = "var(--warn)";
+      $("authError").textContent = "Type your email above first, then tap this again.";
+      return;
+    }
+    auth.sendPasswordResetEmail(email).then(function () {
+      $("authError").style.color = "var(--accent)";
+      $("authError").textContent = "Reset link sent — check your email.";
+    }).catch(function (err) {
+      $("authError").style.color = "var(--warn)";
+      $("authError").textContent = friendlyAuthError(err);
+    });
+  });
+
   $("logoutBtn").addEventListener("click", function () {
     auth.signOut();
   });
@@ -276,13 +300,26 @@
       $("authScreen").style.display = "none";
       $("appScreen").style.display = "flex";
       subscribeBooks();
+      subscribeUser();
     } else {
       $("appScreen").style.display = "none";
       $("authScreen").style.display = "flex";
       if (unsub) { unsub(); unsub = null; }
+      if (unsubUser) { unsubUser(); unsubUser = null; }
       books = [];
+      userGoals = {};
     }
   });
+
+  function subscribeUser() {
+    if (unsubUser) unsubUser();
+    unsubUser = db.collection("users").doc(currentUser.uid)
+      .onSnapshot(function (doc) {
+        var data = doc.data() || {};
+        userGoals = data.goals || {};
+        if (tab === "stats") render();
+      });
+  }
 
   function subscribeBooks() {
     if (unsub) unsub();
@@ -432,6 +469,65 @@
     html += '<div class="stat-row"><span>Currently reading</span><span class="n">' + reading + '</span></div>';
     html += '<div class="stat-row"><span>To read</span><span class="n">' + toRead + '</span></div>';
 
+    // ---- reading goal ----
+    var now = new Date();
+    var thisYear = now.getFullYear();
+    var readThisYearCount = books.filter(function (b) {
+      return b.status === "read" && b.dateRead && b.dateRead.slice(0,4) === String(thisYear);
+    }).length;
+    var goal = userGoals[thisYear] || 0;
+    var goalPct = goal > 0 ? Math.min(100, Math.round((readThisYearCount / goal) * 100)) : 0;
+
+    html += '<div class="section-title">' + thisYear + ' reading goal</div>';
+    if (goal > 0) {
+      html += '<div class="stat-row"><span>' + readThisYearCount + ' of ' + goal + ' books (' + goalPct + '%)</span>' +
+        '<button class="btn-ghost" id="editGoalBtn" style="width:auto;padding:4px 8px;">Edit</button></div>';
+      html += '<div class="cat-track" style="height:8px;margin:4px 0 4px;"><div class="cat-fill" style="width:' + goalPct + '%"></div></div>';
+      if (readThisYearCount < goal) {
+        html += '<div style="font-size:12px;color:var(--text2);margin-bottom:4px;">' + (goal - readThisYearCount) + ' to go</div>';
+      } else {
+        html += '<div style="font-size:12px;color:var(--accent);margin-bottom:4px;">Goal reached 🎉</div>';
+      }
+    } else {
+      html += '<div class="stat-row"><span style="color:var(--text2);">No goal set yet</span>' +
+        '<button class="btn-ghost" id="editGoalBtn" style="width:auto;padding:4px 8px;">Set goal</button></div>';
+    }
+
+    // ---- time-based breakdown ----
+    var thisMonthKey = thisYear + "-" + String(now.getMonth()+1).padStart(2,"0");
+    var lastYear = thisYear - 1;
+    var readThisMonth = books.filter(function (b) { return b.status === "read" && b.dateRead && b.dateRead.slice(0,7) === thisMonthKey; }).length;
+    var readLastYear = books.filter(function (b) { return b.status === "read" && b.dateRead && b.dateRead.slice(0,4) === String(lastYear); }).length;
+
+    html += '<div class="section-title">Reading pace</div>';
+    html += '<div class="stat-row"><span>This month</span><span class="n">' + readThisMonth + '</span></div>';
+    html += '<div class="stat-row"><span>This year (' + thisYear + ')</span><span class="n">' + readThisYearCount + '</span></div>';
+    html += '<div class="stat-row"><span>Last year (' + lastYear + ')</span><span class="n">' + readLastYear + '</span></div>';
+
+    // ---- by year ----
+    var yearMap = {};
+    books.forEach(function (b) {
+      if (b.status === "read" && b.dateRead) {
+        var y = b.dateRead.slice(0,4);
+        yearMap[y] = (yearMap[y] || 0) + 1;
+      }
+    });
+    var years = Object.keys(yearMap).sort(function (a,b) { return b - a; });
+    if (years.length > 0) {
+      var maxYearCount = Math.max.apply(null, years.map(function (y) { return yearMap[y]; }));
+      html += '<div class="section-title">Books read by year</div><ul class="cat-list">';
+      years.forEach(function (y) {
+        var n = yearMap[y];
+        var pct = Math.round((n / maxYearCount) * 100);
+        html += '<li class="cat-item">' +
+          '<span class="cat-name">' + y + '</span>' +
+          '<div class="cat-track"><div class="cat-fill" style="width:' + pct + '%"></div></div>' +
+          '<span class="cat-pct">' + n + '</span>' +
+        '</li>';
+      });
+      html += '</ul>';
+    }
+
     // category breakdown
     var catMap = {};
     books.forEach(function (b) {
@@ -461,6 +557,25 @@
     }
     html += '</div>';
     main.innerHTML = html;
+
+    var goalBtn = $("editGoalBtn");
+    if (goalBtn) {
+      goalBtn.addEventListener("click", function () {
+        var current = userGoals[thisYear] || "";
+        var val = prompt("How many books do you want to read in " + thisYear + "?", current);
+        if (val === null) return;
+        var n = parseInt(val, 10);
+        if (!n || n < 1) return;
+        saveGoal(thisYear, n);
+      });
+    }
+  }
+
+  function saveGoal(year, count) {
+    var update = {};
+    update["goals." + year] = count;
+    db.collection("users").doc(currentUser.uid).set(update, { merge: true })
+      .catch(function (err) { alert("Couldn't save goal: " + err.message); });
   }
 
   // ---------- add / edit form ----------
@@ -501,6 +616,10 @@
       }).join('') +
     '</div>';
 
+    html += '<div id="dateReadWrap" style="display:' + (formStatus === "read" ? "block" : "none") + '">' +
+      '<div class="field-label">Date finished</div>' +
+      '<input class="input" id="fDateRead" type="date" value="' + escapeHtml((book && book.dateRead) ? book.dateRead : todayStr()) + '"/></div>';
+
     html += '<div class="form-actions"><button class="btn" id="saveBook">' + (id ? "Save changes" : "Add book") + '</button></div>';
     if (id) html += '<button class="btn-delete" id="deleteBook">Delete this book</button>';
 
@@ -531,6 +650,13 @@
       el.addEventListener("click", function () {
         formStatus = el.getAttribute("data-status");
         document.querySelectorAll("[data-status]").forEach(function (b) { b.classList.toggle("on", b === el); });
+        var wrap = $("dateReadWrap");
+        if (formStatus === "read") {
+          wrap.style.display = "block";
+          if (!$("fDateRead").value) $("fDateRead").value = todayStr();
+        } else {
+          wrap.style.display = "none";
+        }
       });
     });
 
@@ -555,7 +681,8 @@
       volumeType: formVolType,
       volumeCount: formVolType === "multiple" ? (parseInt($("fVolCount").value, 10) || null) : null,
       length: $("fLength").value ? parseInt($("fLength").value, 10) : null,
-      status: formStatus
+      status: formStatus,
+      dateRead: formStatus === "read" ? $("fDateRead").value : null
     };
     if (pendingCoverData) data.cover = pendingCoverData;
 
